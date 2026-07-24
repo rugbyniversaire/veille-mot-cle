@@ -3,44 +3,42 @@ import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
-from supabase import create_client
-
-# ------------------- CONNEXION SUPABASE -------------------
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 st.set_page_config(page_title="Veille mot-clé", page_icon="🔍")
+st.title("🔍 Outil de veille")
+st.caption("Résultats publiés dans les dernières 24h, toutes sources confondues")
 
-if "session" not in st.session_state:
-    st.session_state.session = None
+if "mots_cles" not in st.session_state:
+    st.session_state.mots_cles = []
 
 
-# ------------------- ECRAN DE CONNEXION -------------------
-def ecran_connexion():
-    st.title("🔍 Outil de veille")
-    onglet_connexion, onglet_inscription = st.tabs(["Connexion", "Inscription"])
+# ------------------- GESTION DES MOTS-CLES -------------------
+st.subheader("Tes mots-clés suivis")
 
-    with onglet_connexion:
-        email = st.text_input("Email", key="email_connexion")
-        mot_de_passe = st.text_input("Mot de passe", type="password", key="mdp_connexion")
-        if st.button("Se connecter"):
-            try:
-                resultat = supabase.auth.sign_in_with_password({"email": email, "password": mot_de_passe})
-                st.session_state.session = resultat.session
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erreur de connexion : {e}")
+col1, col2 = st.columns([4, 1])
+with col1:
+    nouveau_mot_cle = st.text_input("Ajouter un mot-clé", label_visibility="collapsed", placeholder="Ajouter un mot-clé")
+with col2:
+    if st.button("Ajouter") and nouveau_mot_cle.strip():
+        if nouveau_mot_cle.strip() not in st.session_state.mots_cles:
+            st.session_state.mots_cles.append(nouveau_mot_cle.strip())
+        st.rerun()
 
-    with onglet_inscription:
-        email_i = st.text_input("Email", key="email_inscription")
-        mdp_i = st.text_input("Mot de passe (6 caractères min.)", type="password", key="mdp_inscription")
-        if st.button("Créer un compte"):
-            try:
-                supabase.auth.sign_up({"email": email_i, "password": mdp_i})
-                st.success("Compte créé. Vérifie ta boîte mail pour confirmer, puis connecte-toi.")
-            except Exception as e:
-                st.error(f"Erreur d'inscription : {e}")
+if not st.session_state.mots_cles:
+    st.info("Aucun mot-clé ajouté pour l'instant.")
+else:
+    for mc in st.session_state.mots_cles:
+        col_a, col_b = st.columns([5, 1])
+        col_a.write(f"• {mc}")
+        if col_b.button("🗑️", key=f"suppr_{mc}"):
+            st.session_state.mots_cles.remove(mc)
+            st.rerun()
+
+st.divider()
+
+lancer = st.button("Lancer la veille sur tous les mots-clés", disabled=not st.session_state.mots_cles)
+
+LIMITE_HEURES = 24
 
 
 # ------------------- FONCTIONS DE RECHERCHE -------------------
@@ -117,7 +115,7 @@ def chercher_mastodon(mot_cle, seuil):
 
 def rechercher_tout(mot_cle):
     maintenant = datetime.now(timezone.utc)
-    seuil = maintenant - timedelta(hours=24)
+    seuil = maintenant - timedelta(hours=LIMITE_HEURES)
     tous = (
         chercher_google_news(mot_cle, seuil)
         + chercher_reddit(mot_cle, seuil)
@@ -128,67 +126,9 @@ def rechercher_tout(mot_cle):
     return tous, maintenant
 
 
-# ------------------- ECRAN PRINCIPAL (CONNECTE) -------------------
-def ecran_principal():
-    user_id = st.session_state.session.user.id
-
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        st.title("🔍 Outil de veille")
-    with col2:
-        if st.button("Déconnexion"):
-            supabase.auth.sign_out()
-            st.session_state.session = None
-            st.rerun()
-
-    st.subheader("Tes mots-clés suivis")
-
-    nouveau_mot_cle = st.text_input("Ajouter un mot-clé")
-    if st.button("Ajouter") and nouveau_mot_cle.strip():
-        supabase.table("mots_cles").insert({"user_id": user_id, "mot_cle": nouveau_mot_cle.strip()}).execute()
-        st.rerun()
-
-    reponse = supabase.table("mots_cles").select("*").eq("user_id", user_id).order("cree_le", desc=True).execute()
-    mots_cles = reponse.data
-
-    if not mots_cles:
-        st.info("Aucun mot-clé enregistré pour l'instant.")
-    else:
-        for mc in mots_cles:
-            col_a, col_b, col_c = st.columns([3, 1, 1])
-            col_a.write(mc["mot_cle"])
-            if col_b.button("Rechercher", key=f"chercher_{mc['id']}"):
-                st.session_state.mot_cle_actif = mc["mot_cle"]
-            if col_c.button("🗑️", key=f"suppr_{mc['id']}"):
-                supabase.table("mots_cles").delete().eq("id", mc["id"]).execute()
-                st.rerun()
-
-        if st.button("Tout vérifier"):
-            st.session_state.tout_verifier = True
-
-    st.divider()
-
-    # Recherche sur un seul mot-clé
-    if st.session_state.get("mot_cle_actif"):
-        mot = st.session_state.mot_cle_actif
-        st.subheader(f"Résultats pour « {mot} »")
-        with st.spinner("Recherche en cours..."):
-            resultats, maintenant = rechercher_tout(mot)
-        afficher_resultats(resultats, maintenant)
-
-    # Recherche sur tous les mots-clés
-    if st.session_state.get("tout_verifier"):
-        st.session_state.tout_verifier = False
-        for mc in mots_cles:
-            st.subheader(f"Résultats pour « {mc['mot_cle']} »")
-            with st.spinner(f"Recherche pour {mc['mot_cle']}..."):
-                resultats, maintenant = rechercher_tout(mc["mot_cle"])
-            afficher_resultats(resultats, maintenant)
-
-
 def afficher_resultats(resultats, maintenant):
     if not resultats:
-        st.warning("Aucun résultat publié dans les dernières 24h.")
+        st.warning(f"Aucun résultat publié dans les dernières {LIMITE_HEURES}h.")
         return
     st.success(f"{len(resultats)} résultat(s) trouvé(s)")
     for r in resultats:
@@ -200,8 +140,10 @@ def afficher_resultats(resultats, maintenant):
         st.divider()
 
 
-# ------------------- ROUTAGE -------------------
-if st.session_state.session is None:
-    ecran_connexion()
-else:
-    ecran_principal()
+# ------------------- LANCEMENT -------------------
+if lancer:
+    for mc in st.session_state.mots_cles:
+        st.subheader(f"Résultats pour « {mc} »")
+        with st.spinner(f"Recherche pour « {mc} »..."):
+            resultats, maintenant = rechercher_tout(mc)
+        afficher_resultats(resultats, maintenant)
