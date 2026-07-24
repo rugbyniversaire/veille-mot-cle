@@ -3,19 +3,47 @@ import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
+from supabase import create_client
 
-# ------------------- CONFIGURATION DE LA PAGE -------------------
+# ------------------- CONNEXION SUPABASE -------------------
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 st.set_page_config(page_title="Veille mot-clé", page_icon="🔍")
-st.title("🔍 Outil de veille")
-st.caption("Résultats publiés dans les dernières 24h, toutes sources confondues")
 
-mot_cle = st.text_input("Mot-clé à surveiller", value="intelligence artificielle")
-newsapi_key = st.text_input("Clé NewsAPI (optionnel)", value="", type="password")
-lancer = st.button("Lancer la veille")
-
-LIMITE_HEURES = 24
+if "session" not in st.session_state:
+    st.session_state.session = None
 
 
+# ------------------- ECRAN DE CONNEXION -------------------
+def ecran_connexion():
+    st.title("🔍 Outil de veille")
+    onglet_connexion, onglet_inscription = st.tabs(["Connexion", "Inscription"])
+
+    with onglet_connexion:
+        email = st.text_input("Email", key="email_connexion")
+        mot_de_passe = st.text_input("Mot de passe", type="password", key="mdp_connexion")
+        if st.button("Se connecter"):
+            try:
+                resultat = supabase.auth.sign_in_with_password({"email": email, "password": mot_de_passe})
+                st.session_state.session = resultat.session
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erreur de connexion : {e}")
+
+    with onglet_inscription:
+        email_i = st.text_input("Email", key="email_inscription")
+        mdp_i = st.text_input("Mot de passe (6 caractères min.)", type="password", key="mdp_inscription")
+        if st.button("Créer un compte"):
+            try:
+                supabase.auth.sign_up({"email": email_i, "password": mdp_i})
+                st.success("Compte créé. Vérifie ta boîte mail pour confirmer, puis connecte-toi.")
+            except Exception as e:
+                st.error(f"Erreur d'inscription : {e}")
+
+
+# ------------------- FONCTIONS DE RECHERCHE -------------------
 def est_recent(date_publication, seuil):
     if date_publication is None:
         return False
@@ -33,26 +61,6 @@ def chercher_google_news(mot_cle, seuil):
         if est_recent(date_pub, seuil):
             resultats.append({"source": "Google News", "titre": entree.title, "lien": entree.link, "date_pub": date_pub})
     return resultats
-
-
-def chercher_newsapi(mot_cle, seuil, cle):
-    if not cle:
-        return []
-    url = "https://newsapi.org/v2/everything"
-    params = {"q": mot_cle, "language": "fr", "sortBy": "publishedAt", "from": seuil.strftime("%Y-%m-%dT%H:%M:%S"), "apiKey": cle}
-    try:
-        reponse = requests.get(url, params=params, timeout=10)
-        data = reponse.json()
-        resultats = []
-        for article in data.get("articles", []):
-            date_pub = None
-            if article.get("publishedAt"):
-                date_pub = datetime.fromisoformat(article["publishedAt"].replace("Z", "+00:00"))
-            if est_recent(date_pub, seuil):
-                resultats.append({"source": "NewsAPI - " + article.get("source", {}).get("name", ""), "titre": article["title"], "lien": article["url"], "date_pub": date_pub})
-        return resultats
-    except Exception:
-        return []
 
 
 def chercher_reddit(mot_cle, seuil):
@@ -107,28 +115,93 @@ def chercher_mastodon(mot_cle, seuil):
         return []
 
 
-if lancer:
+def rechercher_tout(mot_cle):
     maintenant = datetime.now(timezone.utc)
-    seuil = maintenant - timedelta(hours=LIMITE_HEURES)
+    seuil = maintenant - timedelta(hours=24)
+    tous = (
+        chercher_google_news(mot_cle, seuil)
+        + chercher_reddit(mot_cle, seuil)
+        + chercher_hackernews(mot_cle, seuil)
+        + chercher_mastodon(mot_cle, seuil)
+    )
+    tous.sort(key=lambda r: r["date_pub"], reverse=True)
+    return tous, maintenant
 
-    with st.spinner("Recherche en cours..."):
-        tous = (
-            chercher_google_news(mot_cle, seuil)
-            + chercher_newsapi(mot_cle, seuil, newsapi_key)
-            + chercher_reddit(mot_cle, seuil)
-            + chercher_hackernews(mot_cle, seuil)
-            + chercher_mastodon(mot_cle, seuil)
-        )
-        tous.sort(key=lambda r: r["date_pub"], reverse=True)
 
-    if not tous:
-        st.warning(f"Aucun résultat publié dans les dernières {LIMITE_HEURES}h.")
+# ------------------- ECRAN PRINCIPAL (CONNECTE) -------------------
+def ecran_principal():
+    user_id = st.session_state.session.user.id
+
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.title("🔍 Outil de veille")
+    with col2:
+        if st.button("Déconnexion"):
+            supabase.auth.sign_out()
+            st.session_state.session = None
+            st.rerun()
+
+    st.subheader("Tes mots-clés suivis")
+
+    nouveau_mot_cle = st.text_input("Ajouter un mot-clé")
+    if st.button("Ajouter") and nouveau_mot_cle.strip():
+        supabase.table("mots_cles").insert({"user_id": user_id, "mot_cle": nouveau_mot_cle.strip()}).execute()
+        st.rerun()
+
+    reponse = supabase.table("mots_cles").select("*").eq("user_id", user_id).order("cree_le", desc=True).execute()
+    mots_cles = reponse.data
+
+    if not mots_cles:
+        st.info("Aucun mot-clé enregistré pour l'instant.")
     else:
-        st.success(f"{len(tous)} résultat(s) trouvé(s)")
-        for r in tous:
-            age = maintenant - r["date_pub"]
-            heures = int(age.total_seconds() // 3600)
-            minutes = int((age.total_seconds() % 3600) // 60)
-            st.markdown(f"**[{r['source']}]** {r['titre']}")
-            st.markdown(f"[{r['lien']}]({r['lien']}) — il y a {heures}h{minutes:02d}min")
-            st.divider()
+        for mc in mots_cles:
+            col_a, col_b, col_c = st.columns([3, 1, 1])
+            col_a.write(mc["mot_cle"])
+            if col_b.button("Rechercher", key=f"chercher_{mc['id']}"):
+                st.session_state.mot_cle_actif = mc["mot_cle"]
+            if col_c.button("🗑️", key=f"suppr_{mc['id']}"):
+                supabase.table("mots_cles").delete().eq("id", mc["id"]).execute()
+                st.rerun()
+
+        if st.button("Tout vérifier"):
+            st.session_state.tout_verifier = True
+
+    st.divider()
+
+    # Recherche sur un seul mot-clé
+    if st.session_state.get("mot_cle_actif"):
+        mot = st.session_state.mot_cle_actif
+        st.subheader(f"Résultats pour « {mot} »")
+        with st.spinner("Recherche en cours..."):
+            resultats, maintenant = rechercher_tout(mot)
+        afficher_resultats(resultats, maintenant)
+
+    # Recherche sur tous les mots-clés
+    if st.session_state.get("tout_verifier"):
+        st.session_state.tout_verifier = False
+        for mc in mots_cles:
+            st.subheader(f"Résultats pour « {mc['mot_cle']} »")
+            with st.spinner(f"Recherche pour {mc['mot_cle']}..."):
+                resultats, maintenant = rechercher_tout(mc["mot_cle"])
+            afficher_resultats(resultats, maintenant)
+
+
+def afficher_resultats(resultats, maintenant):
+    if not resultats:
+        st.warning("Aucun résultat publié dans les dernières 24h.")
+        return
+    st.success(f"{len(resultats)} résultat(s) trouvé(s)")
+    for r in resultats:
+        age = maintenant - r["date_pub"]
+        heures = int(age.total_seconds() // 3600)
+        minutes = int((age.total_seconds() % 3600) // 60)
+        st.markdown(f"**[{r['source']}]** {r['titre']}")
+        st.markdown(f"[{r['lien']}]({r['lien']}) — il y a {heures}h{minutes:02d}min")
+        st.divider()
+
+
+# ------------------- ROUTAGE -------------------
+if st.session_state.session is None:
+    ecran_connexion()
+else:
+    ecran_principal()
