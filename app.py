@@ -9,6 +9,8 @@ st.set_page_config(page_title="Veille mot-clé", page_icon="🔍")
 st.title("🔍 Outil de veille")
 st.caption("Résultats publiés dans les dernières 24h, toutes sources confondues")
 
+YOUTUBE_API_KEY = st.secrets.get("YOUTUBE_API_KEY", "")
+
 if "mots_cles" not in st.session_state:
     st.session_state.mots_cles = []
 
@@ -40,7 +42,7 @@ st.divider()
 lancer = st.button("Lancer la veille sur tous les mots-clés", disabled=not st.session_state.mots_cles)
 
 LIMITE_HEURES = 24
-SEUIL_SIMILARITE = 0.35  # entre 0 et 1 : plus c'est haut, plus les titres doivent se ressembler pour être regroupés
+SEUIL_SIMILARITE = 0.35
 
 MOTS_VIDES = {
     "le", "la", "les", "un", "une", "des", "de", "du", "et", "en", "au", "aux",
@@ -85,7 +87,6 @@ def regrouper_resultats(resultats):
 
 
 def synthetiser_titre(elements):
-    """Construit un titre représentatif à partir des mots les plus fréquents du groupe."""
     if len(elements) == 1:
         return elements[0]["titre"]
 
@@ -190,6 +191,44 @@ def chercher_mastodon(mot_cle, seuil):
         return []
 
 
+def chercher_youtube(mot_cle, seuil):
+    if not YOUTUBE_API_KEY:
+        return []
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        "key": YOUTUBE_API_KEY,
+        "q": mot_cle,
+        "part": "snippet",
+        "type": "video",
+        "order": "date",
+        "maxResults": 25,
+        "publishedAfter": seuil.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "relevanceLanguage": "fr",
+    }
+    try:
+        reponse = requests.get(url, params=params, timeout=10)
+        if reponse.status_code != 200:
+            return []
+        data = reponse.json()
+        resultats = []
+        for item in data.get("items", []):
+            snippet = item.get("snippet", {})
+            date_pub = None
+            if snippet.get("publishedAt"):
+                date_pub = datetime.fromisoformat(snippet["publishedAt"].replace("Z", "+00:00"))
+            video_id = item.get("id", {}).get("videoId")
+            if est_recent(date_pub, seuil) and video_id:
+                resultats.append({
+                    "source": "YouTube - " + snippet.get("channelTitle", ""),
+                    "titre": snippet.get("title", ""),
+                    "lien": f"https://www.youtube.com/watch?v={video_id}",
+                    "date_pub": date_pub
+                })
+        return resultats
+    except Exception:
+        return []
+
+
 def rechercher_tout(mot_cle):
     maintenant = datetime.now(timezone.utc)
     seuil = maintenant - timedelta(hours=LIMITE_HEURES)
@@ -198,6 +237,7 @@ def rechercher_tout(mot_cle):
         + chercher_reddit(mot_cle, seuil)
         + chercher_hackernews(mot_cle, seuil)
         + chercher_mastodon(mot_cle, seuil)
+        + chercher_youtube(mot_cle, seuil)
     )
     tous.sort(key=lambda r: r["date_pub"], reverse=True)
     return tous, maintenant
@@ -240,6 +280,8 @@ def afficher_resultats(resultats, maintenant):
 
 # ------------------- LANCEMENT -------------------
 if lancer:
+    if not YOUTUBE_API_KEY:
+        st.info("Astuce : ajoute YOUTUBE_API_KEY dans les Secrets Streamlit pour inclure les vidéos YouTube.")
     for mc in st.session_state.mots_cles:
         st.subheader(f"Résultats pour « {mc} »")
         with st.spinner(f"Recherche pour « {mc} »..."):
