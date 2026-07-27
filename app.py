@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import feedparser
+import re
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 
@@ -39,6 +40,48 @@ st.divider()
 lancer = st.button("Lancer la veille sur tous les mots-clés", disabled=not st.session_state.mots_cles)
 
 LIMITE_HEURES = 24
+SEUIL_SIMILARITE = 0.35  # entre 0 et 1 : plus c'est haut, plus les titres doivent se ressembler pour être regroupés
+
+MOTS_VIDES = {
+    "le", "la", "les", "un", "une", "des", "de", "du", "et", "en", "au", "aux",
+    "pour", "avec", "sur", "dans", "par", "est", "sont", "qui", "que", "son",
+    "sa", "ses", "ce", "cette", "ces", "il", "elle", "ils", "elles", "vers",
+    "ne", "pas", "plus", "leur", "leurs", "après", "avant", "the", "and", "of",
+    "to", "in", "a", "an", "is", "for", "on", "with", "at", "by"
+}
+
+
+# ------------------- REGROUPEMENT PAR SIMILARITE -------------------
+def normaliser_titre(titre):
+    mots = re.findall(r"[a-zàâäéèêëïîôöùûüç0-9]+", titre.lower())
+    return {m for m in mots if m not in MOTS_VIDES and len(m) > 2}
+
+
+def similarite(mots_a, mots_b):
+    if not mots_a or not mots_b:
+        return 0
+    intersection = len(mots_a & mots_b)
+    union = len(mots_a | mots_b)
+    return intersection / union if union else 0
+
+
+def regrouper_resultats(resultats):
+    groupes = []  # chaque groupe : {"mots": set, "elements": [résultats]}
+    for r in resultats:
+        mots_titre = normaliser_titre(r["titre"])
+        meilleur_groupe = None
+        meilleur_score = 0
+        for groupe in groupes:
+            score = similarite(mots_titre, groupe["mots"])
+            if score > SEUIL_SIMILARITE and score > meilleur_score:
+                meilleur_groupe = groupe
+                meilleur_score = score
+        if meilleur_groupe:
+            meilleur_groupe["elements"].append(r)
+            meilleur_groupe["mots"] |= mots_titre  # enrichit le profil du groupe
+        else:
+            groupes.append({"mots": mots_titre, "elements": [r]})
+    return groupes
 
 
 # ------------------- FONCTIONS DE RECHERCHE -------------------
@@ -130,13 +173,32 @@ def afficher_resultats(resultats, maintenant):
     if not resultats:
         st.warning(f"Aucun résultat publié dans les dernières {LIMITE_HEURES}h.")
         return
-    st.success(f"{len(resultats)} résultat(s) trouvé(s)")
-    for r in resultats:
-        age = maintenant - r["date_pub"]
+
+    groupes = regrouper_resultats(resultats)
+    groupes.sort(key=lambda g: max(e["date_pub"] for e in g["elements"]), reverse=True)
+
+    st.success(f"{len(resultats)} résultat(s) trouvé(s), regroupés en {len(groupes)} sujet(s)")
+
+    for groupe in groupes:
+        elements = groupe["elements"]
+        principal = elements[0]
+        age = maintenant - principal["date_pub"]
         heures = int(age.total_seconds() // 3600)
         minutes = int((age.total_seconds() % 3600) // 60)
-        st.markdown(f"**[{r['source']}]** {r['titre']}")
-        st.markdown(f"[{r['lien']}]({r['lien']}) — il y a {heures}h{minutes:02d}min")
+
+        if len(elements) == 1:
+            st.markdown(f"**[{principal['source']}]** {principal['titre']}")
+            st.markdown(f"[{principal['lien']}]({principal['lien']}) — il y a {heures}h{minutes:02d}min")
+        else:
+            st.markdown(f"**{principal['titre']}**")
+            st.caption(f"{len(elements)} articles similaires — le plus récent il y a {heures}h{minutes:02d}min")
+            with st.expander(f"Voir les {len(elements)} sources"):
+                for e in elements:
+                    age_e = maintenant - e["date_pub"]
+                    h_e = int(age_e.total_seconds() // 3600)
+                    m_e = int((age_e.total_seconds() % 3600) // 60)
+                    st.markdown(f"**[{e['source']}]** {e['titre']}")
+                    st.markdown(f"[{e['lien']}]({e['lien']}) — il y a {h_e}h{m_e:02d}min")
         st.divider()
 
 
