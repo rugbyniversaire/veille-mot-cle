@@ -66,7 +66,7 @@ def similarite(mots_a, mots_b):
 
 
 def regrouper_resultats(resultats):
-    groupes = []  # chaque groupe : {"mots": set, "elements": [résultats]}
+    groupes = []
     for r in resultats:
         mots_titre = normaliser_titre(r["titre"])
         meilleur_groupe = None
@@ -78,10 +78,44 @@ def regrouper_resultats(resultats):
                 meilleur_score = score
         if meilleur_groupe:
             meilleur_groupe["elements"].append(r)
-            meilleur_groupe["mots"] |= mots_titre  # enrichit le profil du groupe
+            meilleur_groupe["mots"] |= mots_titre
         else:
             groupes.append({"mots": mots_titre, "elements": [r]})
     return groupes
+
+
+def synthetiser_titre(elements):
+    """Construit un titre représentatif à partir des mots les plus fréquents du groupe."""
+    if len(elements) == 1:
+        return elements[0]["titre"]
+
+    compte = {}
+    casse_originale = {}
+    ordre_apparition = []
+
+    for e in elements:
+        mots_bruts = re.findall(r"[A-Za-zÀ-ÿ0-9]+", e["titre"])
+        vus_dans_ce_titre = set()
+        for m in mots_bruts:
+            m_norm = m.lower()
+            if m_norm in MOTS_VIDES or len(m_norm) <= 2:
+                continue
+            if m_norm not in vus_dans_ce_titre:
+                compte[m_norm] = compte.get(m_norm, 0) + 1
+                vus_dans_ce_titre.add(m_norm)
+            if m_norm not in casse_originale:
+                casse_originale[m_norm] = m
+                ordre_apparition.append(m_norm)
+
+    seuil_frequence = max(2, (len(elements) + 1) // 2)
+    mots_choisis = [m for m in ordre_apparition if compte.get(m, 0) >= seuil_frequence]
+
+    if not mots_choisis:
+        mots_choisis = sorted(ordre_apparition, key=lambda m: -compte.get(m, 0))[:6]
+
+    mots_choisis = mots_choisis[:6]
+    titre = " ".join(casse_originale[m] for m in mots_choisis)
+    return titre if titre else elements[0]["titre"]
 
 
 # ------------------- FONCTIONS DE RECHERCHE -------------------
@@ -181,24 +215,26 @@ def afficher_resultats(resultats, maintenant):
 
     for groupe in groupes:
         elements = groupe["elements"]
-        principal = elements[0]
-        age = maintenant - principal["date_pub"]
+        titre_groupe = synthetiser_titre(elements)
+        plus_recent = max(e["date_pub"] for e in elements)
+        age = maintenant - plus_recent
         heures = int(age.total_seconds() // 3600)
         minutes = int((age.total_seconds() % 3600) // 60)
 
         if len(elements) == 1:
-            st.markdown(f"**[{principal['source']}]** {principal['titre']}")
-            st.markdown(f"[{principal['lien']}]({principal['lien']}) — il y a {heures}h{minutes:02d}min")
+            e = elements[0]
+            st.markdown(f"**[{e['source']}]** {e['titre']}")
+            st.markdown(f"[{e['lien']}]({e['lien']}) — il y a {heures}h{minutes:02d}min")
         else:
-            st.markdown(f"**{principal['titre']}**")
-            st.caption(f"{len(elements)} articles similaires — le plus récent il y a {heures}h{minutes:02d}min")
-            with st.expander(f"Voir les {len(elements)} sources"):
+            label = f"{titre_groupe}  —  🗞️ {len(elements)} articles (dernier il y a {heures}h{minutes:02d}min)"
+            with st.expander(label):
                 for e in elements:
                     age_e = maintenant - e["date_pub"]
                     h_e = int(age_e.total_seconds() // 3600)
                     m_e = int((age_e.total_seconds() % 3600) // 60)
                     st.markdown(f"**[{e['source']}]** {e['titre']}")
                     st.markdown(f"[{e['lien']}]({e['lien']}) — il y a {h_e}h{m_e:02d}min")
+                    st.markdown("")
         st.divider()
 
 
