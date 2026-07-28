@@ -92,7 +92,7 @@ def regrouper_resultats(resultats):
     return groupes
 
 
-def synthetiser_titre(elements):
+def synthetiser_titre_heuristique(elements):
     if len(elements) == 1:
         return elements[0]["titre"]
 
@@ -123,6 +123,48 @@ def synthetiser_titre(elements):
     mots_choisis = mots_choisis[:6]
     titre = " ".join(casse_originale[m] for m in mots_choisis)
     return titre if titre else elements[0]["titre"]
+
+
+def synthetiser_titre_ia(elements):
+    titres = [e["titre"] for e in elements[:8]]
+    prompt = (
+        "Voici plusieurs titres d'articles ou de posts qui parlent du même sujet d'actualité. "
+        "Propose un titre de synthèse court (8 mots maximum), neutre et informatif, en français. "
+        "Réponds uniquement avec le titre, sans guillemets ni ponctuation finale, sans préambule.\n\n"
+        + "\n".join(f"- {t}" for t in titres)
+    )
+    try:
+        reponse = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 60,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=10,
+        )
+        if reponse.status_code != 200:
+            return None
+        data = reponse.json()
+        texte = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
+        return texte.strip('"« »') or None
+    except Exception:
+        return None
+
+
+def synthetiser_titre(elements):
+    if len(elements) == 1:
+        return elements[0]["titre"]
+    if ANTHROPIC_API_KEY:
+        titre_ia = synthetiser_titre_ia(elements)
+        if titre_ia:
+            return titre_ia
+    return synthetiser_titre_heuristique(elements)
 
 
 # ------------------- FONCTIONS DE RECHERCHE -------------------
@@ -170,6 +212,13 @@ def dedupliquer(resultats):
     return uniques
 
 
+def extraire_image_html(html):
+    if not html:
+        return None
+    match = re.search(r'<img[^>]+src="([^"]+)"', html)
+    return match.group(1) if match else None
+
+
 def chercher_google_news(mot_cle, seuil):
     url = f"https://news.google.com/rss/search?q={quote(mot_cle)}&hl=fr&gl=FR&ceid=FR:fr"
     flux = feedparser.parse(url)
@@ -187,7 +236,8 @@ def chercher_google_news(mot_cle, seuil):
             if titre_sans_media.strip():
                 titre_brut = titre_sans_media.strip()
         source_label = "Google News" + (f" - {media.strip()}" if media else "")
-        resultats.append({"source": source_label, "titre": titre_brut, "lien": entree.link, "date_pub": date_pub})
+        image = extraire_image_html(entree.get("summary", ""))
+        resultats.append({"source": source_label, "titre": titre_brut, "lien": entree.link, "date_pub": date_pub, "image": image})
     return resultats
 
 
@@ -201,7 +251,8 @@ def chercher_reddit(mot_cle, seuil):
             if entree.get("published_parsed"):
                 date_pub = datetime(*entree.published_parsed[:6], tzinfo=timezone.utc)
             if est_recent(date_pub, seuil):
-                resultats.append({"source": "Reddit", "titre": entree.title, "lien": entree.link, "date_pub": date_pub})
+                image = extraire_image_html(entree.get("summary", ""))
+                resultats.append({"source": "Reddit", "titre": entree.title, "lien": entree.link, "date_pub": date_pub, "image": image})
         return resultats
     except Exception:
         return []
@@ -216,7 +267,7 @@ def chercher_hackernews(mot_cle, seuil):
         resultats = []
         for hit in data.get("hits", []):
             date_pub = datetime.fromtimestamp(hit.get("created_at_i", 0), tz=timezone.utc)
-            resultats.append({"source": "Hacker News", "titre": hit.get("title", ""), "lien": hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}", "date_pub": date_pub})
+            resultats.append({"source": "Hacker News", "titre": hit.get("title", ""), "lien": hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}", "date_pub": date_pub, "image": None})
         return resultats
     except Exception:
         return []
@@ -235,7 +286,9 @@ def chercher_mastodon(mot_cle, seuil):
         for statut in data.get("statuses", []):
             date_pub = parser_date_iso(statut.get("created_at"))
             if est_recent(date_pub, seuil):
-                resultats.append({"source": "Mastodon - @" + statut.get("account", {}).get("acct", ""), "titre": statut.get("content", "")[:120], "lien": statut.get("url", ""), "date_pub": date_pub})
+                pieces_jointes = statut.get("media_attachments", [])
+                image = pieces_jointes[0].get("preview_url") if pieces_jointes else None
+                resultats.append({"source": "Mastodon - @" + statut.get("account", {}).get("acct", ""), "titre": statut.get("content", "")[:120], "lien": statut.get("url", ""), "date_pub": date_pub, "image": image})
         return resultats
     except Exception:
         return []
@@ -266,11 +319,18 @@ def chercher_bluesky(mot_cle, seuil):
             rkey = uri.split("/")[-1] if uri else ""
             lien = f"https://bsky.app/profile/{handle}/post/{rkey}" if handle and rkey else ""
             texte = record.get("text", "")[:120]
+            embed = post.get("embed", {})
+            image = None
+            if embed.get("images"):
+                image = embed["images"][0].get("thumb")
+            elif embed.get("external", {}).get("thumb"):
+                image = embed["external"]["thumb"]
             resultats.append({
                 "source": "Bluesky - @" + handle,
                 "titre": texte,
                 "lien": lien,
-                "date_pub": date_pub
+                "date_pub": date_pub,
+                "image": image
             })
         except Exception:
             continue
@@ -304,11 +364,14 @@ def chercher_youtube(mot_cle, seuil):
             titre_video = snippet.get("title", "")
             description = snippet.get("description", "")
             if est_recent(date_pub, seuil) and video_id and est_pertinent(mot_cle, titre_video + " " + description):
+                miniatures = snippet.get("thumbnails", {})
+                image = (miniatures.get("medium") or miniatures.get("default") or {}).get("url")
                 resultats.append({
                     "source": "YouTube - " + snippet.get("channelTitle", ""),
-                    "titre": snippet.get("title", ""),
+                    "titre": titre_video,
                     "lien": f"https://www.youtube.com/watch?v={video_id}",
-                    "date_pub": date_pub
+                    "date_pub": date_pub,
+                    "image": image
                 })
         return resultats
     except Exception:
@@ -358,11 +421,22 @@ def afficher_resultats(resultats, maintenant, ne_garder_que_regroupes=False):
 
         if len(elements) == 1:
             e = elements[0]
-            st.markdown(f"**[{e['source']}]** {e['titre']}")
-            st.markdown(f"[{e['lien']}]({e['lien']}) — il y a {heures}h{minutes:02d}min")
+            col_img, col_texte = st.columns([1, 4]) if e.get("image") else (None, st)
+            if col_img:
+                with col_img:
+                    st.image(e["image"], use_container_width=True)
+                with col_texte:
+                    st.markdown(f"**[{e['source']}]** {e['titre']}")
+                    st.markdown(f"[{e['lien']}]({e['lien']}) — il y a {heures}h{minutes:02d}min")
+            else:
+                st.markdown(f"**[{e['source']}]** {e['titre']}")
+                st.markdown(f"[{e['lien']}]({e['lien']}) — il y a {heures}h{minutes:02d}min")
         else:
             label = f"{titre_groupe}  —  🗞️ {len(elements)} articles (dernier il y a {heures}h{minutes:02d}min)"
             with st.expander(label):
+                image_groupe = next((e.get("image") for e in elements if e.get("image")), None)
+                if image_groupe:
+                    st.image(image_groupe, width=320)
                 for e in elements:
                     age_e = maintenant - e["date_pub"]
                     h_e = int(age_e.total_seconds() // 3600)
@@ -377,6 +451,8 @@ def afficher_resultats(resultats, maintenant, ne_garder_que_regroupes=False):
 if lancer:
     if not YOUTUBE_API_KEY:
         st.info("Astuce : ajoute YOUTUBE_API_KEY dans les Secrets Streamlit pour inclure les vidéos YouTube.")
+    if not ANTHROPIC_API_KEY:
+        st.info("Astuce : ajoute ANTHROPIC_API_KEY dans les Secrets Streamlit pour des titres de synthèse plus naturels.")
     for mc in st.session_state.mots_cles:
         st.subheader(f"Résultats pour « {mc} »")
         with st.spinner(f"Recherche pour « {mc} »..."):
