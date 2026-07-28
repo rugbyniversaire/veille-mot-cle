@@ -42,7 +42,7 @@ st.divider()
 lancer = st.button("Lancer la veille sur tous les mots-clés", disabled=not st.session_state.mots_cles)
 
 LIMITE_HEURES = 24
-SEUIL_SIMILARITE = 0.35
+SEUIL_SIMILARITE = 0.28
 
 MOTS_VIDES = {
     "le", "la", "les", "un", "une", "des", "de", "du", "et", "en", "au", "aux",
@@ -126,6 +126,44 @@ def est_recent(date_publication, seuil):
     return date_publication >= seuil
 
 
+def parser_date_iso(chaine):
+    """Parse une date ISO 8601 de façon tolérante (gère les fractions de secondes non standard)."""
+    if not chaine:
+        return None
+    chaine = chaine.replace("Z", "+00:00")
+    match = re.match(r"^(.*?\.\d{1,6})\d*(\+.*)$", chaine)
+    if match:
+        chaine = match.group(1) + match.group(2)
+    try:
+        return datetime.fromisoformat(chaine)
+    except ValueError:
+        return None
+
+
+def est_pertinent(mot_cle, texte):
+    """Vérifie que la majorité des mots significatifs du mot-clé apparaissent dans le texte."""
+    mots_cle = [m for m in re.findall(r"[a-zàâäéèêëïîôöùûüç0-9]+", mot_cle.lower()) if len(m) > 2]
+    if not mots_cle:
+        return True
+    texte_norm = texte.lower()
+    trouves = sum(1 for m in mots_cle if m in texte_norm)
+    seuil_requis = max(1, round(len(mots_cle) * 0.6))
+    return trouves >= seuil_requis
+
+
+def dedupliquer(resultats):
+    """Supprime les doublons stricts (même lien ou même titre)."""
+    vus = set()
+    uniques = []
+    for r in resultats:
+        cle = (r["lien"] or "") + "|" + r["titre"].strip().lower()
+        if cle in vus:
+            continue
+        vus.add(cle)
+        uniques.append(r)
+    return uniques
+
+
 def chercher_google_news(mot_cle, seuil):
     url = f"https://news.google.com/rss/search?q={quote(mot_cle)}&hl=fr&gl=FR&ceid=FR:fr"
     flux = feedparser.parse(url)
@@ -134,8 +172,16 @@ def chercher_google_news(mot_cle, seuil):
         date_pub = None
         if entree.get("published_parsed"):
             date_pub = datetime(*entree.published_parsed[:6], tzinfo=timezone.utc)
-        if est_recent(date_pub, seuil):
-            resultats.append({"source": "Google News", "titre": entree.title, "lien": entree.link, "date_pub": date_pub})
+        if not est_recent(date_pub, seuil):
+            continue
+        titre_brut = entree.title
+        media = None
+        if " - " in titre_brut:
+            titre_sans_media, _, media = titre_brut.rpartition(" - ")
+            if titre_sans_media.strip():
+                titre_brut = titre_sans_media.strip()
+        source_label = "Google News" + (f" - {media.strip()}" if media else "")
+        resultats.append({"source": source_label, "titre": titre_brut, "lien": entree.link, "date_pub": date_pub})
     return resultats
 
 
@@ -181,9 +227,7 @@ def chercher_mastodon(mot_cle, seuil):
         data = reponse.json()
         resultats = []
         for statut in data.get("statuses", []):
-            date_pub = None
-            if statut.get("created_at"):
-                date_pub = datetime.fromisoformat(statut["created_at"].replace("Z", "+00:00"))
+            date_pub = parser_date_iso(statut.get("created_at"))
             if est_recent(date_pub, seuil):
                 resultats.append({"source": "Mastodon - @" + statut.get("account", {}).get("acct", ""), "titre": statut.get("content", "")[:120], "lien": statut.get("url", ""), "date_pub": date_pub})
         return resultats
@@ -200,12 +244,14 @@ def chercher_bluesky(mot_cle, seuil):
         if reponse.status_code != 200:
             return []
         data = reponse.json()
-        resultats = []
-        for post in data.get("posts", []):
+    except Exception:
+        return []
+
+    resultats = []
+    for post in data.get("posts", []):
+        try:
             record = post.get("record", {})
-            date_pub = None
-            if record.get("createdAt"):
-                date_pub = datetime.fromisoformat(record["createdAt"].replace("Z", "+00:00"))
+            date_pub = parser_date_iso(record.get("createdAt"))
             if not est_recent(date_pub, seuil):
                 continue
             auteur = post.get("author", {})
@@ -220,9 +266,9 @@ def chercher_bluesky(mot_cle, seuil):
                 "lien": lien,
                 "date_pub": date_pub
             })
-        return resultats
-    except Exception:
-        return []
+        except Exception:
+            continue
+    return resultats
 
 
 def chercher_youtube(mot_cle, seuil):
@@ -247,11 +293,11 @@ def chercher_youtube(mot_cle, seuil):
         resultats = []
         for item in data.get("items", []):
             snippet = item.get("snippet", {})
-            date_pub = None
-            if snippet.get("publishedAt"):
-                date_pub = datetime.fromisoformat(snippet["publishedAt"].replace("Z", "+00:00"))
+            date_pub = parser_date_iso(snippet.get("publishedAt"))
             video_id = item.get("id", {}).get("videoId")
-            if est_recent(date_pub, seuil) and video_id:
+            titre_video = snippet.get("title", "")
+            description = snippet.get("description", "")
+            if est_recent(date_pub, seuil) and video_id and est_pertinent(mot_cle, titre_video + " " + description):
                 resultats.append({
                     "source": "YouTube - " + snippet.get("channelTitle", ""),
                     "titre": snippet.get("title", ""),
@@ -274,6 +320,8 @@ def rechercher_tout(mot_cle):
         + chercher_bluesky(mot_cle, seuil)
         + chercher_youtube(mot_cle, seuil)
     )
+    tous = [r for r in tous if est_pertinent(mot_cle, r["titre"])]
+    tous = dedupliquer(tous)
     tous.sort(key=lambda r: r["date_pub"], reverse=True)
     return tous, maintenant
 
