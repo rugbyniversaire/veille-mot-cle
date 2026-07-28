@@ -39,10 +39,14 @@ else:
 
 st.divider()
 
-lancer = st.button("Lancer la veille sur tous les mots-clés", disabled=not st.session_state.mots_cles)
+col_lancer, col_filtre = st.columns([2, 2])
+with col_lancer:
+    lancer = st.button("Lancer la veille sur tous les mots-clés", disabled=not st.session_state.mots_cles)
+with col_filtre:
+    ne_garder_que_regroupes = st.checkbox("N'afficher que les sujets avec plusieurs sources", value=False)
 
 LIMITE_HEURES = 24
-SEUIL_SIMILARITE = 0.28
+SEUIL_SIMILARITE = 0.42
 
 MOTS_VIDES = {
     "le", "la", "les", "un", "une", "des", "de", "du", "et", "en", "au", "aux",
@@ -64,7 +68,9 @@ def similarite(mots_a, mots_b):
         return 0
     intersection = len(mots_a & mots_b)
     union = len(mots_a | mots_b)
-    return intersection / union if union else 0
+    jaccard = intersection / union if union else 0
+    chevauchement = intersection / min(len(mots_a), len(mots_b))
+    return max(jaccard, chevauchement)
 
 
 def regrouper_resultats(resultats):
@@ -326,13 +332,19 @@ def rechercher_tout(mot_cle):
     return tous, maintenant
 
 
-def afficher_resultats(resultats, maintenant):
+def afficher_resultats(resultats, maintenant, ne_garder_que_regroupes=False):
     if not resultats:
         st.warning(f"Aucun résultat publié dans les dernières {LIMITE_HEURES}h.")
         return
 
     groupes = regrouper_resultats(resultats)
     groupes.sort(key=lambda g: max(e["date_pub"] for e in g["elements"]), reverse=True)
+
+    if ne_garder_que_regroupes:
+        groupes = [g for g in groupes if len(g["elements"]) > 1]
+        if not groupes:
+            st.warning("Aucun sujet couvert par plusieurs sources pour l'instant. Décoche le filtre pour tout voir.")
+            return
 
     st.success(f"{len(resultats)} résultat(s) trouvé(s), regroupés en {len(groupes)} sujet(s)")
 
@@ -369,4 +381,4 @@ if lancer:
         st.subheader(f"Résultats pour « {mc} »")
         with st.spinner(f"Recherche pour « {mc} »..."):
             resultats, maintenant = rechercher_tout(mc)
-        afficher_resultats(resultats, maintenant)
+        afficher_resultats(resultats, maintenant, ne_garder_que_regroupes)
