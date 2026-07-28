@@ -92,7 +92,7 @@ def regrouper_resultats(resultats):
     return groupes
 
 
-def synthetiser_titre_heuristique(elements):
+def synthetiser_titre(elements):
     if len(elements) == 1:
         return elements[0]["titre"]
 
@@ -123,48 +123,6 @@ def synthetiser_titre_heuristique(elements):
     mots_choisis = mots_choisis[:6]
     titre = " ".join(casse_originale[m] for m in mots_choisis)
     return titre if titre else elements[0]["titre"]
-
-
-def synthetiser_titre_ia(elements):
-    titres = [e["titre"] for e in elements[:8]]
-    prompt = (
-        "Voici plusieurs titres d'articles ou de posts qui parlent du même sujet d'actualité. "
-        "Propose un titre de synthèse court (8 mots maximum), neutre et informatif, en français. "
-        "Réponds uniquement avec le titre, sans guillemets ni ponctuation finale, sans préambule.\n\n"
-        + "\n".join(f"- {t}" for t in titres)
-    )
-    try:
-        reponse = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 60,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=10,
-        )
-        if reponse.status_code != 200:
-            return None
-        data = reponse.json()
-        texte = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
-        return texte.strip('"« »') or None
-    except Exception:
-        return None
-
-
-def synthetiser_titre(elements):
-    if len(elements) == 1:
-        return elements[0]["titre"]
-    if ANTHROPIC_API_KEY:
-        titre_ia = synthetiser_titre_ia(elements)
-        if titre_ia:
-            return titre_ia
-    return synthetiser_titre_heuristique(elements)
 
 
 # ------------------- FONCTIONS DE RECHERCHE -------------------
@@ -451,8 +409,6 @@ def afficher_resultats(resultats, maintenant, ne_garder_que_regroupes=False):
 if lancer:
     if not YOUTUBE_API_KEY:
         st.info("Astuce : ajoute YOUTUBE_API_KEY dans les Secrets Streamlit pour inclure les vidéos YouTube.")
-    if not ANTHROPIC_API_KEY:
-        st.info("Astuce : ajoute ANTHROPIC_API_KEY dans les Secrets Streamlit pour des titres de synthèse plus naturels.")
     for mc in st.session_state.mots_cles:
         st.subheader(f"Résultats pour « {mc} »")
         with st.spinner(f"Recherche pour « {mc} »..."):
