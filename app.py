@@ -191,6 +191,40 @@ def chercher_mastodon(mot_cle, seuil):
         return []
 
 
+def chercher_bluesky(mot_cle, seuil):
+    url = "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts"
+    params = {"q": mot_cle, "sort": "latest", "limit": 25}
+    headers = {"User-Agent": "veille-outil/1.0"}
+    try:
+        reponse = requests.get(url, params=params, headers=headers, timeout=10)
+        if reponse.status_code != 200:
+            return []
+        data = reponse.json()
+        resultats = []
+        for post in data.get("posts", []):
+            record = post.get("record", {})
+            date_pub = None
+            if record.get("createdAt"):
+                date_pub = datetime.fromisoformat(record["createdAt"].replace("Z", "+00:00"))
+            if not est_recent(date_pub, seuil):
+                continue
+            auteur = post.get("author", {})
+            handle = auteur.get("handle", "")
+            uri = post.get("uri", "")
+            rkey = uri.split("/")[-1] if uri else ""
+            lien = f"https://bsky.app/profile/{handle}/post/{rkey}" if handle and rkey else ""
+            texte = record.get("text", "")[:120]
+            resultats.append({
+                "source": "Bluesky - @" + handle,
+                "titre": texte,
+                "lien": lien,
+                "date_pub": date_pub
+            })
+        return resultats
+    except Exception:
+        return []
+
+
 def chercher_youtube(mot_cle, seuil):
     if not YOUTUBE_API_KEY:
         return []
@@ -237,6 +271,7 @@ def rechercher_tout(mot_cle):
         + chercher_reddit(mot_cle, seuil)
         + chercher_hackernews(mot_cle, seuil)
         + chercher_mastodon(mot_cle, seuil)
+        + chercher_bluesky(mot_cle, seuil)
         + chercher_youtube(mot_cle, seuil)
     )
     tous.sort(key=lambda r: r["date_pub"], reverse=True)
